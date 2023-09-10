@@ -7,6 +7,8 @@ import shutil
 
 class Path:
 
+  __slots__ = ('_path',)
+
   filesystems = []
 
   def __new__(cls, path):
@@ -119,6 +121,8 @@ class Path:
 
 class LocalPath(Path):
 
+  __slots__ = ('_path',)
+
   def __init__(self, path):
     super().__init__(os.path.expanduser(str(path)))
 
@@ -164,13 +168,20 @@ class LocalPath(Path):
 
 class GFilePath(Path):
 
+  __slots__ = ('_path',)
+
+  gfile = None
+
   def __init__(self, path):
     path = str(path)
     if not (path.startswith('/') or '://' in path):
       path = os.path.abspath(os.path.expanduser(path))
     super().__init__(path)
-    import tensorflow as tf
-    self._gfile = tf.io.gfile
+    if not type(self).gfile:
+      import tensorflow as tf
+      tf.config.set_visible_devices([], 'GPU')
+      tf.config.set_visible_devices([], 'TPU')
+      type(self).gfile = tf.io.gfile
 
   @contextlib.contextmanager
   def open(self, mode='r'):
@@ -180,40 +191,40 @@ class GFilePath(Path):
     if mode.startswith('x') and self.exists():
       raise FileExistsError(path)
       mode = mode.replace('x', 'w')
-    with self._gfile.GFile(path, mode) as f:
+    with self.gfile.GFile(path, mode) as f:
       yield f
 
   def absolute(self):
     return self
 
   def glob(self, pattern):
-    for path in self._gfile.glob(f'{str(self)}/{pattern}'):
+    for path in self.gfile.glob(f'{str(self)}/{pattern}'):
       yield type(self)(path)
 
   def exists(self):
-    return self._gfile.exists(str(self))
+    return self.gfile.exists(str(self))
 
   def isfile(self):
     return self.exists() and not self.isdir()
 
   def isdir(self):
-    return self._gfile.isdir(str(self))
+    return self.gfile.isdir(str(self))
 
   def mkdirs(self):
-    self._gfile.makedirs(str(self))
+    self.gfile.makedirs(str(self))
 
   def remove(self):
-    self._gfile.remove(str(self))
+    self.gfile.remove(str(self))
 
   def rmtree(self):
-    self._gfile.rmtree(str(self))
+    self.gfile.rmtree(str(self))
 
   def copy(self, dest):
     dest = type(self)(dest)
     if self.isfile():
-      self._gfile.copy(str(self), str(dest), overwrite=True)
+      self.gfile.copy(str(self), str(dest), overwrite=True)
     else:
-      for folder, subdirs, files in self._gfile.walk(str(self)):
+      for folder, subdirs, files in self.gfile.walk(str(self)):
         target = type(self)(folder.replace(str(self), str(dest)))
         target.exists() or target.mkdirs()
         for file in files:
@@ -223,11 +234,10 @@ class GFilePath(Path):
     dest = Path(dest)
     if dest.isdir():
       dest.rmtree()
-    self._gfile.rename(self, str(dest), overwrite=True)
+    self.gfile.rename(self, str(dest), overwrite=True)
 
 
 Path.filesystems = [
     (GFilePath, lambda path: path.startswith('gs://')),
-    (GFilePath, lambda path: path.startswith('/cns/')),
     (LocalPath, lambda path: True),
 ]

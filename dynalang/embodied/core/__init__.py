@@ -1,6 +1,6 @@
 from .base import Agent, Env, Wrapper, Replay
 
-from .basics import convert, treemap, pack, unpack
+from .basics import treemap
 from .basics import print_ as print
 from .basics import format_ as format
 
@@ -16,9 +16,12 @@ from .parallel import Parallel
 from .timer import Timer
 from .worker import Worker
 from .batcher import Batcher
-from .metrics import Metrics
+from .prefetch import Prefetch
+from .agg import Agg
 from .uuid import uuid
 from .usage import Usage
+from .rwlock import RWLock
+from .fps import FPS
 
 from .batch_env import BatchEnv
 from .random import RandomAgent
@@ -26,4 +29,4 @@ from .random import RandomAgent
 from . import logger
 from . import when
 from . import wrappers
-from . import distr
+from . import timer

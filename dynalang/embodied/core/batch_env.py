@@ -1,6 +1,7 @@
 import numpy as np
 
 from . import base
+from . import timer
 
 
 class BatchEnv(base.Env):
@@ -23,6 +24,7 @@ class BatchEnv(base.Env):
   def __len__(self):
     return len(self._envs)
 
+  @timer.section('batch_env_step')
   def step(self, action):
     assert all(len(v) == len(self._envs) for v in action.values()), (
         len(self._envs), {k: v.shape for k, v in action.items()})

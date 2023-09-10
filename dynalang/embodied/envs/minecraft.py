@@ -1,202 +1,158 @@
-import logging
-import threading
-
 import embodied
 import numpy as np
 
-from . import gym
+from . import minecraft_base
 
 
-class Minecraft(embodied.Env):
+class Minecraft(embodied.Wrapper):
 
-  _LOCK = threading.Lock()
+  def __init__(self, task, *args, **kwargs):
+    super().__init__({
+        'wood': MinecraftWood,
+        'climb': MinecraftClimb,
+        'diamond': MinecraftDiamond,
+    }[task](*args, **kwargs))
 
-  def __init__(
-      self, task,
-      repeat=1,
-      size=(64, 64),
-      length=24000,
-      sticky_attack=30,
-      sticky_jump=10,
-      pitch_limit=(-60, 60),
-      show_actions=True,
-      logs=False):
-    self._task = task
-    self._repeat = repeat
-    self._size = size
-    self._show_actions = show_actions
 
-    # Make env.
-    if logs:
-      logging.basicConfig(level=logging.DEBUG)
-    with self._LOCK:
-      import gym as openai_gym
-      from .import minerl_internal
-      ids = [x.id for x in openai_gym.envs.registry.all()]
-      minerl_internal.SIZE = size
-      if 'MinecraftDiamond-v1' not in ids:
-        minerl_internal.Diamond().register()
-      if 'MinecraftDiscover-v1' not in ids:
-        minerl_internal.Discover().register()
-      if 'MinecraftWood-v1' not in ids:
-        minerl_internal.Wood().register()
-      if 'MinecraftTable-v1' not in ids:
-        minerl_internal.Table().register()
-      if 'MinecraftAxe-v1' not in ids:
-        minerl_internal.Axe().register()
-      self._inner = openai_gym.make(f'Minecraft{task.title()}-v1')
-    self._env = gym.Gym(self._inner)
-    self._env = embodied.wrappers.TimeLimit(self._env, length)
+class MinecraftWood(embodied.Wrapper):
 
-    # Observations.
-    self._inv_keys = [
-        k for k in self._env.obs_space if k.startswith('inventory/')]
-    self._step = 0
-    self._collected_items = set()
-    self._equip_enum = self._inner.observation_space[
-        'equipped_items']['mainhand']['type'].values.tolist()
-    self._obs_space = self.obs_space
-
-    # Actions.
-    self._noop_action = minerl_internal.NOOP_ACTION
-    actions = self._insert_defaults({
-        'discover': minerl_internal.DISCOVER_ACTIONS,
-        'diamond': minerl_internal.DIAMOND_ACTIONS,
-        'wood': minerl_internal.WOOD_ACTIONS,
-        'table': minerl_internal.TABLE_ACTIONS,
-        'axe': minerl_internal.AXE_ACTIONS,
-    }[task])
-    self._action_names = tuple(actions.keys())
-    self._action_values = tuple(actions.values())
-    message = f'Minecraft action space ({len(self._action_values)}):'
-    print(message, ', '.join(self._action_names))
-    self._sticky_attack_length = sticky_attack
-    self._sticky_attack_counter = 0
-    self._sticky_jump_length = sticky_jump
-    self._sticky_jump_counter = 0
-    self._pitch_limit = pitch_limit
-    self._pitch = 0
-
-  @property
-  def obs_space(self):
-    return {
-        'image': embodied.Space(np.uint8, self._size + (3,)),
-        'inventory': embodied.Space(np.float32, len(self._inv_keys), 0),
-        'equipped': embodied.Space(np.float32, len(self._equip_enum), 0, 1),
-        **{f'log_{k}': embodied.Space(np.int64) for k in self._inv_keys},
-        'reward': embodied.Space(np.float32),
-        'new_items': embodied.Space(np.int64),
-        'is_first': embodied.Space(bool),
-        'is_last': embodied.Space(bool),
-        'is_terminal': embodied.Space(bool),
-    }
-
-  @property
-  def act_space(self):
-    return {
-        'action': embodied.Space(np.int64, (), 0, len(self._action_values)),
-        'reset': embodied.Space(bool),
-    }
+  def __init__(self, *args, **kwargs):
+    actions = BASIC_ACTIONS
+    self.rewards = [
+        CollectReward('log', repeated=1),
+        HealthReward(),
+    ]
+    length = kwargs.pop('length', 36000)
+    env = minecraft_base.MinecraftBase(actions, *args, **kwargs)
+    env = embodied.wrappers.TimeLimit(env, length)
+    super().__init__(env)
 
   def step(self, action):
-    action = action.copy()
-    index = action.pop('action')
-    action.update(self._action_values[index])
-    action = self._action(action)
-    if action['reset']:
-      obs = self._reset()
-    else:
-      following = self._noop_action.copy()
-      for key in ('attack', 'forward', 'back', 'left', 'right'):
-        following[key] = action[key]
-      for act in [action] + ([following] * (self._repeat - 1)):
-        obs = self._env.step(act)
-        if 'error' in self._env.info:
-          obs = self._reset()
-          break
-    new_items = self._track_new_items(obs)
-    obs = self._obs(obs, new_items, index)
-    self._step += 1
+    obs = self.env.step(action)
+    reward = sum([fn(obs, self.env.inventory) for fn in self.rewards])
+    obs['reward'] = np.float32(reward)
     return obs
 
-  def _reset(self):
-    with self._LOCK:
-      obs = self._env.step({'reset': True})
-    self._step = 0
-    self._collected_items.clear()
-    self._sticky_attack_counter = 0
-    self._sticky_jump_counter = 0
-    self._pitch = 0
+
+class MinecraftClimb(embodied.Wrapper):
+
+  def __init__(self, *args, **kwargs):
+    actions = BASIC_ACTIONS
+    length = kwargs.pop('length', 36000)
+    env = minecraft_base.MinecraftBase(actions, *args, **kwargs)
+    env = embodied.wrappers.TimeLimit(env, length)
+    super().__init__(env)
+    self._previous = None
+    self._health_reward = HealthReward()
+
+  def step(self, action):
+    obs = self.env.step(action)
+    x, y, z = obs['log_player_pos']
+    height = np.float32(y)
+    if obs['is_first']:
+      self._previous = height
+    reward = (height - self._previous) + self._health_reward(obs)
+    obs['reward'] = np.float32(reward)
+    self._previous = height
     return obs
 
-  def _obs(self, obs, new_items, action_index):
-    inventory = np.array([obs[k] for k in self._inv_keys], np.float32)
-    inventory = np.log(1 + np.array(inventory))
-    index = self._equip_enum.index(obs['equipped_items/mainhand/type'])
-    equipped = np.zeros(len(self._equip_enum), np.float32)
-    equipped[index] = 1.0
-    if self._task == 'discover':
-      reward = new_items
-    else:
-      reward = obs['reward']
-    obs = {
-        'image': obs['pov'],
-        'inventory': inventory,
-        'equipped': equipped,
-        **{f'log_{k}': np.int64(obs[k]) for k in self._inv_keys},
-        'reward': np.float32(reward),
-        'new_items': new_items,
-        'is_first': obs['is_first'],
-        'is_last': obs['is_last'],
-        'is_terminal': obs['is_terminal'],
+
+class MinecraftDiamond(embodied.Wrapper):
+
+  def __init__(self, *args, **kwargs):
+    actions = {
+        **BASIC_ACTIONS,
+        'craft_planks': dict(craft='planks'),
+        'craft_stick': dict(craft='stick'),
+        'craft_crafting_table': dict(craft='crafting_table'),
+        'place_crafting_table': dict(place='crafting_table'),
+        'craft_wooden_pickaxe': dict(nearbyCraft='wooden_pickaxe'),
+        'craft_stone_pickaxe': dict(nearbyCraft='stone_pickaxe'),
+        'craft_iron_pickaxe': dict(nearbyCraft='iron_pickaxe'),
+        'equip_stone_pickaxe': dict(equip='stone_pickaxe'),
+        'equip_wooden_pickaxe': dict(equip='wooden_pickaxe'),
+        'equip_iron_pickaxe': dict(equip='iron_pickaxe'),
+        'craft_furnace': dict(nearbyCraft='furnace'),
+        'place_furnace': dict(place='furnace'),
+        'smelt_iron_ingot': dict(nearbySmelt='iron_ingot'),
     }
-    for key, value in obs.items():
-      space = self._obs_space[key]
-      if not isinstance(value, np.ndarray):
-        value = np.array(value)
-      assert value in space, (key, value, value.dtype, value.shape, space)
-    if self._show_actions:
-      obs['image'][-1, action_index, :] = 255
+    self.rewards = [
+        CollectReward('log', once=1),
+        CollectReward('planks', once=1),
+        CollectReward('stick', once=1),
+        CollectReward('crafting_table', once=1),
+        CollectReward('wooden_pickaxe', once=1),
+        CollectReward('cobblestone', once=1),
+        CollectReward('stone_pickaxe', once=1),
+        CollectReward('iron_ore', once=1),
+        CollectReward('furnace', once=1),
+        CollectReward('iron_ingot', once=1),
+        CollectReward('iron_pickaxe', once=1),
+        CollectReward('diamond', once=1),
+        HealthReward(),
+    ]
+    length = kwargs.pop('length', 36000)
+    env = minecraft_base.MinecraftBase(actions, *args, **kwargs)
+    env = embodied.wrappers.TimeLimit(env, length)
+    super().__init__(env)
+
+  def step(self, action):
+    obs = self.env.step(action)
+    reward = sum([fn(obs, self.env.inventory) for fn in self.rewards])
+    obs['reward'] = np.float32(reward)
     return obs
 
-  def _action(self, action):
-    if self._sticky_attack_length:
-      if action['attack']:
-        self._sticky_attack_counter = self._sticky_attack_length
-      if self._sticky_attack_counter > 0:
-        action['attack'] = 1
-        action['jump'] = 0
-        self._sticky_attack_counter -= 1
-    if self._sticky_jump_length:
-      if action['jump']:
-        self._sticky_jump_counter = self._sticky_jump_length
-      if self._sticky_jump_counter > 0:
-        action['jump'] = 1
-        action['forward'] = 1
-        self._sticky_jump_counter -= 1
-    if self._pitch_limit and action['camera'][0]:
-      lo, hi = self._pitch_limit
-      if not (lo <= self._pitch + action['camera'][0] <= hi):
-        action['camera'] = (0, action['camera'][1])
-      self._pitch += action['camera'][0]
-    return action
 
-  def _track_new_items(self, obs):
-    new_items = 0
-    for key in self._inv_keys:
-      if key in self._collected_items:
-        continue
-      if key == 'inventory/air':
-        continue
-      if obs[key].item() > 0:
-        new_items += 1
-        self._collected_items.add(key)
-    return new_items
+class CollectReward:
 
-  def _insert_defaults(self, actions):
-    actions = {name: action.copy() for name, action in actions.items()}
-    for key, default in self._noop_action.items():
-      for action in actions.values():
-        if key not in action:
-          action[key] = default
-    return actions
+  def __init__(self, item, once=0, repeated=0):
+    self.item = item
+    self.once = once
+    self.repeated = repeated
+    self.previous = 0
+    self.maximum = 0
+
+  def __call__(self, obs, inventory):
+    current = inventory[self.item]
+    if obs['is_first']:
+      self.previous = current
+      self.maximum = current
+      return 0
+    reward = self.repeated * max(0, current - self.previous)
+    if self.maximum == 0 and current > 0:
+      reward += self.once
+    self.previous = current
+    self.maximum = max(self.maximum, current)
+    return reward
+
+
+class HealthReward:
+
+  def __init__(self, scale=0.01):
+    self.scale = scale
+    self.previous = None
+
+  def __call__(self, obs, inventory=None):
+    health = obs['health']
+    if obs['is_first']:
+      self.previous = health
+      return 0
+    reward = self.scale * (health - self.previous)
+    self.previous = health
+    return np.float32(reward)
+
+
+BASIC_ACTIONS = {
+    'noop': dict(),
+    'attack': dict(attack=1),
+    'turn_up': dict(camera=(-15, 0)),
+    'turn_down': dict(camera=(15, 0)),
+    'turn_left': dict(camera=(0, -15)),
+    'turn_right': dict(camera=(0, 15)),
+    'forward': dict(forward=1),
+    'back': dict(back=1),
+    'left': dict(left=1),
+    'right': dict(right=1),
+    'jump': dict(jump=1, forward=1),
+    'place_dirt': dict(place='dirt'),
+}

@@ -20,7 +20,7 @@ class Fifo:
     if self.queue[0] == key:
       self.queue.popleft()
     else:
-      # TODO: This is extremely slow.
+      # This is very slow but typically not used.
       self.queue.remove(key)
 
 
@@ -95,8 +95,8 @@ class Prioritized:
         del self.prios[stepid]
 
   def _aggregate(self, key):
-    # TODO: Both list comprehensions in this function are a performance
-    # bottleneck because they are called very often.
+    # Both list comprehensions in this function are a performance bottleneck
+    # because they are called very often.
     prios = [self.prios[stepid] for stepid in self.items[key]]
     if self.exponent != 1.0:
       prios = [x ** self.exponent for x in prios]

@@ -1,6 +1,5 @@
 import collections
 import concurrent.futures
-import datetime
 import json
 import os
 import re
@@ -8,7 +7,9 @@ import time
 
 import numpy as np
 
+from . import basics
 from . import path
+from . import timer
 
 
 class Logger:
@@ -22,13 +23,19 @@ class Logger:
     self._last_time = None
     self._metrics = []
 
+  @timer.section('logger_add')
   def add(self, mapping, prefix=None):
+    mapping = dict(mapping)
+    # print('logger add:', len(mapping))
+    assert len(mapping) <= 1000, list(mapping.keys())
+    for key in mapping.keys():
+      assert len(key) <= 200, (len(key), key[:200] + '...')
     step = int(self.step) * self.multiplier
-    for name, value in dict(mapping).items():
+    for name, value in mapping.items():
       name = f'{prefix}/{name}' if prefix else name
-      if isinstance(value, str):
-        pass
-      else:
+      if isinstance(value, np.ndarray) and np.issubdtype(value.dtype, str):
+        value = str(value)
+      if not isinstance(value, str):
         value = np.asarray(value)
         if len(value.shape) not in (0, 1, 2, 3, 4):
           raise ValueError(
@@ -60,6 +67,7 @@ class Logger:
     assert isinstance(value, str), (type(value), str(value)[:100])
     self.add({name: value})
 
+  @timer.section('logger_write')
   def write(self, fps=False):
     if fps:
       value = self._compute_fps()
@@ -90,49 +98,52 @@ class AsyncOutput:
     self._callback = callback
     self._parallel = parallel
     if parallel:
-      self._executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
+      self._worker = concurrent.futures.ThreadPoolExecutor(1, 'logger_async')
       self._future = None
 
   def __call__(self, summaries):
     if self._parallel:
       self._future and self._future.result()
-      self._future = self._executor.submit(self._callback, summaries)
+      self._future = self._worker.submit(self._callback, summaries)
     else:
       self._callback(summaries)
 
 
 class TerminalOutput:
 
-  def __init__(self, pattern=r'.*', name=None):
-    self._pattern = re.compile(pattern)
+  def __init__(self, pattern=r'.*', name=None, limit=50):
+    self._pattern = (pattern != r'.*') and re.compile(pattern)
     self._name = name
-    try:
-      import rich.console
-      self._console = rich.console.Console()
-    except ImportError:
-      self._console = None
+    self._limit = limit
 
+  @timer.section('terminal')
   def __call__(self, summaries):
     step = max(s for s, _, _, in summaries)
     scalars = {
         k: float(v) for _, k, v in summaries
         if isinstance(v, np.ndarray) and len(v.shape) == 0}
-    scalars = {k: v for k, v in scalars.items() if self._pattern.search(k)}
-    formatted = {k: self._format_value(v) for k, v in scalars.items()}
-    if self._console:
-      if self._name:
-        self._console.rule(f'[green bold]{self._name} (Step {step})')
-      else:
-        self._console.rule(f'[green bold]Step {step}')
-      self._console.print(' [blue]/[/blue] '.join(
-          f'{k} {v}' for k, v in formatted.items()))
-      print('')
+    if self._pattern:
+      scalars = {k: v for k, v in scalars.items() if self._pattern.search(k)}
     else:
-      message = ' / '.join(f'{k} {v}' for k, v in formatted.items())
-      message = f'[{step}] {message}'
-      if self._name:
-        message = f'[{self._name}] {message}'
-      print(message, flush=True)
+      truncated = 0
+      if len(scalars) > self._limit:
+        truncated = len(scalars) - self._limit
+        scalars = dict(list(scalars.items())[:self._limit])
+    formatted = {k: self._format_value(v) for k, v in scalars.items()}
+    if self._name:
+      header = f'{"-"*20}[{self._name} Step {step}]{"-"*20}'
+    else:
+      header = f'{"-"*20}[Step {step}]{"-"*20}'
+    if formatted:
+      content = ' / '.join(f'{k} {v}' for k, v in formatted.items())
+    else:
+      content = 'No metrics.'
+    if self._pattern:
+      content += f"\n(Filtered by '{self._pattern.pattern}')"
+    elif truncated:
+      content += f'\n({truncated} more entries truncated;'
+      content += ' filter to see specific keys.)'
+    basics.print_(f'{header}\n{content}', flush=True)
 
   def _format_value(self, value):
     value = float(value)
@@ -159,12 +170,13 @@ class JSONLOutput(AsyncOutput):
       self, logdir, filename='metrics.jsonl', pattern=r'.*',
       strings=False, parallel=True):
     super().__init__(self._write, parallel)
-    self._filename = filename
     self._pattern = re.compile(pattern)
     self._strings = strings
-    self._logdir = path.Path(logdir)
-    self._logdir.mkdirs()
+    logdir = path.Path(logdir)
+    logdir.mkdirs()
+    self._filename = logdir / filename
 
+  @timer.section('jsonl')
   def _write(self, summaries):
     bystep = collections.defaultdict(dict)
     for step, name, value in summaries:
@@ -177,13 +189,15 @@ class JSONLOutput(AsyncOutput):
     lines = ''.join([
         json.dumps({'step': step, **scalars}) + '\n'
         for step, scalars in bystep.items()])
-    with (self._logdir / self._filename).open('a') as f:
+    basics.print_(f'Writing metrics: {self._filename}')
+    with self._filename.open('a') as f:
       f.write(lines)
 
 
 class TensorBoardOutput(AsyncOutput):
 
-  def __init__(self, logdir, fps=20, maxsize=1e9, parallel=True):
+  def __init__(
+      self, logdir, fps=20, maxsize=1e9, videos=True, parallel=True):
     super().__init__(self._write, parallel)
     self._logdir = str(logdir)
     if self._logdir.startswith('/gcs/'):
@@ -191,10 +205,15 @@ class TensorBoardOutput(AsyncOutput):
     self._fps = fps
     self._writer = None
     self._maxsize = self._logdir.startswith('gs://') and maxsize
+    self._videos = videos
     if self._maxsize:
       self._checker = concurrent.futures.ThreadPoolExecutor(max_workers=1)
       self._promise = None
+    import tensorflow as tf
+    tf.config.set_visible_devices([], 'GPU')
+    tf.config.set_visible_devices([], 'TPU')
 
+  @timer.section('tensorboard_write')
   def _write(self, summaries):
     import tensorflow as tf
     reset = False
@@ -209,7 +228,6 @@ class TensorBoardOutput(AsyncOutput):
           self._logdir, flush_millis=1000, max_queue=10000)
     self._writer.set_as_default()
     for step, name, value in summaries:
-      if "text" in name: continue
       try:
         if isinstance(value, str):
           tf.summary.text(name, value, step)
@@ -225,23 +243,25 @@ class TensorBoardOutput(AsyncOutput):
           tf.summary.image(name, value, step)
         elif len(value.shape) == 3:
           tf.summary.image(name, value, step)
-        elif len(value.shape) == 4 and \
-          (value.shape[-1] == 1 or value.shape[-1] == 3):
+        elif len(value.shape) == 4 and self._videos:
           self._video_summary(name, value, step)
       except Exception:
         print('Error writing summary:', name)
         raise
     self._writer.flush()
 
+  @timer.section('tensorboard_check')
   def _check(self):
     import tensorflow as tf
     events = tf.io.gfile.glob(self._logdir.rstrip('/') + '/events.out.*')
     return tf.io.gfile.stat(sorted(events)[-1]).length if events else 0
 
+  @timer.section('tensorboard_video')
   def _video_summary(self, name, video, step):
     import tensorflow as tf
     import tensorflow.compat.v1 as tf1
     name = name if isinstance(name, str) else name.decode('utf-8')
+    assert video.dtype in (np.float32, np.uint8), (video.shape, video.dtype)
     if np.issubdtype(video.dtype, np.floating):
       video = np.clip(255 * video, 0, 255).astype(np.uint8)
     try:
@@ -335,6 +355,7 @@ class MLFlowOutput:
       self._mlflow.start_run(run_name=run_name, tags=tags)
 
 
+@timer.section('gif')
 def _encode_gif(frames, fps):
   from subprocess import Popen, PIPE
   h, w, c = frames[0].shape

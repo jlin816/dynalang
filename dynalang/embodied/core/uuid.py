@@ -8,9 +8,14 @@ class uuid:
   """UUID that is stored as 16 byte string and can be converted to and from
   int, string, and array types."""
 
+  __slots__ = ('value', '_hash')
+
   DEBUG_ID = None
   BASE62 = string.digits + string.ascii_letters
   BASE62REV = {x: i for i, x in enumerate(BASE62)}
+
+  # def __new__(cls, val=None):
+  #   return val or np.random.randint(1, 2 ** 63)
 
   @classmethod
   def reset(cls, *, debug):

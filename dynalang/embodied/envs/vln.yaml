@@ -1,6 +1,0 @@
-BASE_TASK_CONFIG_PATH: dynalang/embodied/envs/vlnce_task.yaml # VLN_CE/habitat_extensions/config/vlnce_task.yaml
-TRAINER_NAME: dynalang
-ENV_NAME: VLNCEWaypointEnv
-SIMULATOR_GPU_IDS: [1]
-TORCH_GPU_ID: 1
-NUM_ENVIRONMENTS: 1

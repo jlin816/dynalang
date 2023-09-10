@@ -13,8 +13,8 @@ class DMC(embodied.Env):
   )
 
   def __init__(self, env, repeat=1, render=True, size=(64, 64), camera=-1):
-    # TODO: This env variable may be necessary when running on a headless GPU
-    # but breaks when running on a CPU machine.
+    # TODO: This env variable is meant for headless GPU machines but may fail
+    # on CPU-only machines.
     if 'MUJOCO_GL' not in os.environ:
       os.environ['MUJOCO_GL'] = 'egl'
     if isinstance(env, str):
@@ -33,9 +33,8 @@ class DMC(embodied.Env):
         from dm_control import suite
         env = suite.load(domain, task)
     self._dmenv = env
-    from . import dmenv
-    # self._physics = env.physics
-    self._env = dmenv.DMEnv(self._dmenv)
+    from . import from_dm
+    self._env = from_dm.FromDM(self._dmenv)
     self._env = embodied.wrappers.ExpandScalars(self._env)
     self._env = embodied.wrappers.ActionRepeat(self._env, repeat)
     self._render = render
@@ -60,6 +59,9 @@ class DMC(embodied.Env):
     obs = self._env.step(action)
     if self._render:
       obs['image'] = self.render()
+    for key, space in self.obs_space.items():
+      if np.issubdtype(space.dtype, np.floating):
+        assert np.isfinite(obs[key]).all(), (key, obs[key])
     return obs
 
   def render(self):

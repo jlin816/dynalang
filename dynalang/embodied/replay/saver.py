@@ -24,7 +24,7 @@ class Saver:
     buffer = self.buffers[worker]
     buffer.append(step)
     if buffer.length >= self.chunks:
-      self.buffers[worker] = buffer.successor = chunklib.Chunk(self.chunks)
+      self.buffers[worker] = buffer.succ = chunklib.Chunk(self.chunks)
       self.promises.append(self.workers.submit(buffer.save, self.directory))
       for promise in [x for x in self.promises if x.done()]:
         promise.result()
@@ -39,7 +39,7 @@ class Saver:
       self.promises.clear()
 
   def load(self, capacity, length):
-    filenames = chunklib.Chunk.scan(self.directory, capacity, length - 1)
+    filenames = scan(self.directory, capacity, length - 1)
     if not filenames:
       return
     threads = min(len(filenames), 32)
@@ -55,10 +55,10 @@ class Saver:
           print(f'Error loading chunk {filename}: {e}')
     streamids = {}
     for chunk in reversed(sorted(chunks, key=lambda x: x.time)):
-      if chunk.successor not in streamids:
+      if chunk.succ not in streamids:
         streamids[chunk.uuid] = int(embodied.uuid())
       else:
-        streamids[chunk.uuid] = streamids[chunk.successor]
+        streamids[chunk.uuid] = streamids[chunk.succ]
     self.loading = True
     for i, chunk in enumerate(chunks):
       stream = streamids[chunk.uuid]
@@ -69,3 +69,14 @@ class Saver:
       chunks[i] = None
       del chunk
     self.loading = False
+
+
+def scan(directory, capacity=None, shorten=0):
+  directory = embodied.Path(directory)
+  filenames, total = [], 0
+  for filename in reversed(sorted(directory.glob('*.npz'))):
+    if capacity and total >= capacity:
+      break
+    filenames.append(filename)
+    total += max(0, int(filename.stem.split('-')[3]) - shorten)
+  return sorted(filenames)

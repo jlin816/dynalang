@@ -5,13 +5,13 @@ class Agent:
   def __init__(self, obs_space, act_space, step, config):
     pass
 
-  # def policy_state(self, batch_size):
-  #   raise NotImplementedError(
-  #       "policy_state(batch_size) -> state")
+  def init_policy(self, batch_size):
+    raise NotImplementedError(
+        "init_policy(batch_size) -> state")
 
-  # def train_state(self, batch_size):
-  #   raise NotImplementedError(
-  #       "train_state(batch_size) -> state")
+  def init_train(self, batch_size):
+    raise NotImplementedError(
+        "init_train(batch_size) -> state")
 
   def policy(self, obs, state=None, mode='train'):
     raise NotImplementedError(

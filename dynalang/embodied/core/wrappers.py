@@ -6,75 +6,15 @@ import numpy as np
 from . import base
 from . import space as spacelib
 
-class OneHotObs(base.Wrapper):
-
-  def __init__(self, env, key):
-    super().__init__(env)
-    self._count = int(env.obs_space[key].high)
-    self._key = key
-
-  @functools.cached_property
-  def obs_space(self):
-    shape = (self._count,)
-    space = spacelib.Space(np.float32, shape, 0, 1)
-    space.sample = functools.partial(self._sample, self._count)
-    space._discrete = True
-    return {**self.env.obs_space, self._key: space}
-
-  def step(self, action):
-    obs = self.env.step(action)
-    one_hot = np.zeros(self._count)
-    one_hot[obs[self._key]] = 1
-    obs[self._key] = one_hot
-    return obs
-
-  @staticmethod
-  def _sample(count):
-    index = np.random.randint(0, count)
-    action = np.zeros(count, dtype=np.float32)
-    action[index] = 1.0
-    return action
-
-
-
-class ReadFirst(base.Wrapper):
-
-  def __init__(self, env, duration, zero_obs=True):
-    super().__init__(env)
-    self._duration = duration
-    self._zero_obs = zero_obs
-    self._step = 0
-    self._done = False
-#    self._shape = self.env.obs_space['image'].shape
-    self.init_obs = None
-    print(f"ReadFirst: reading for {self._duration}, zero={self._zero_obs}")
-
-  def step(self, action):
-    if action['reset'] or self._done:
-      self._step = 0
-      self.init_obs = self.env.step(action)
-    if self._step < self._duration:
-      obs = self.init_obs
-      if self._step > 0:
-        obs['is_first'] = False
-      if self._zero_obs:
-        obs['image'] = np.zeros_like(self.init_obs['image'])
-    else:
-      obs = self.env.step(action)
-    self._step += 1
-    self._done = obs['is_last']
-    return obs
-
 
 class TimeLimit(base.Wrapper):
 
-  def __init__(self, env, duration, reset=True, timeout_reward=0.0):
+  def __init__(self, env, duration, reset=True):
     super().__init__(env)
     self._duration = duration
     self._reset = reset
     self._step = 0
     self._done = False
-    self.timeout_reward = timeout_reward
 
   def step(self, action):
     if action['reset'] or self._done:
@@ -92,7 +32,6 @@ class TimeLimit(base.Wrapper):
     obs = self.env.step(action)
     if self._duration and self._step >= self._duration:
       obs['is_last'] = True
-      obs['reward'] += self.timeout_reward
     self._done = obs['is_last']
     return obs
 
@@ -102,10 +41,9 @@ class ActionRepeat(base.Wrapper):
   def __init__(self, env, repeat):
     super().__init__(env)
     self._repeat = repeat
-    self._done = False
 
   def step(self, action):
-    if action['reset'] or self._done:
+    if action['reset']:
       return self.env.step(action)
     reward = 0.0
     for _ in range(self._repeat):
@@ -114,7 +52,6 @@ class ActionRepeat(base.Wrapper):
       if obs['is_last'] or obs['is_terminal']:
         break
     obs['reward'] = np.float32(reward)
-    self._done = obs['is_last']
     return obs
 
 
@@ -154,18 +91,51 @@ class NormalizeAction(base.Wrapper):
     return self.env.step({**action, self._key: orig})
 
 
+class OneHotObservation(base.Wrapper):
+
+  def __init__(self, env, key):
+    super().__init__(env)
+    space = env.obs_space[key]
+    assert space.dtype in (np.uint32, np.uint64), space
+    self._count = int(space.high)
+    self._key = key
+
+  @functools.cached_property
+  def obs_space(self):
+    shape = (self._count,)
+    space = spacelib.Space(np.float32, shape, 0, 1)
+    space.sample = functools.partial(self._sample, self._count)
+    space._discrete = True
+    return {**self.env.obs_space, self._key: space}
+
+  def step(self, action):
+    obs = self.env.step(action)
+    onehot = np.zeros(self._count, np.float32)
+    onehot[obs[self._key]] = 1.0
+    obs[self._key] = onehot
+    return obs
+
+  @staticmethod
+  def _sample(count):
+    index = np.random.randint(0, count)
+    sample = np.zeros(count, np.float32)
+    sample[index] = 1.0
+    return sample
+
+
 class OneHotAction(base.Wrapper):
 
   def __init__(self, env, key='action'):
     super().__init__(env)
     self._count = int(env.act_space[key].high)
+    self._dtype = int(env.act_space[key].dtype)
     self._key = key
 
   @functools.cached_property
   def act_space(self):
     shape = (self._count,)
     space = spacelib.Space(np.float32, shape, 0, 1)
-    space.sample = functools.partial(self._sample_action, self._count)
+    space.sample = functools.partial(self._sample, self._count)
     space._discrete = True
     return {**self.env.act_space, self._key: space}
 
@@ -174,15 +144,15 @@ class OneHotAction(base.Wrapper):
       assert action[self._key].min() == 0.0, action
       assert action[self._key].max() == 1.0, action
       assert action[self._key].sum() == 1.0, action
-    index = np.argmax(action[self._key])
+    index = np.argmax(action[self._key]).astype(self._dtype)
     return self.env.step({**action, self._key: index})
 
   @staticmethod
-  def _sample_action(count):
+  def _sample(count):
     index = np.random.randint(0, count)
-    action = np.zeros(count, dtype=np.float32)
-    action[index] = 1.0
-    return action
+    sample = np.zeros(count, np.float32)
+    sample[index] = 1.0
+    return sample
 
 
 class ExpandScalars(base.Wrapper):
@@ -250,6 +220,33 @@ class FlattenTwoDimObs(base.Wrapper):
     return obs
 
 
+class FlattenTwoDimActions(base.Wrapper):
+
+  def __init__(self, env):
+    super().__init__(env)
+    self._origs = {}
+    self._act_space = {}
+    for key, space in self.env.act_space.items():
+      if len(space.shape) == 2:
+        space = spacelib.Space(
+            space.dtype,
+            (int(np.prod(space.shape)),),
+            space.low.flatten(),
+            space.high.flatten())
+        self._origs[key] = space.shape
+      self._act_space[key] = space
+
+  @functools.cached_property
+  def act_space(self):
+    return self._act_space
+
+  def step(self, action):
+    action = action.copy()
+    for key, shape in self._origs.items():
+      action[key] = action[key].reshape(shape)
+    return self.env.step(action)
+
+
 class CheckSpaces(base.Wrapper):
 
   def __init__(self, env):
@@ -260,13 +257,12 @@ class CheckSpaces(base.Wrapper):
       self._check(value, self.env.act_space[key], key)
     obs = self.env.step(action)
     for key, value in obs.items():
-      if "language" in key or key.startswith("log_"): continue
       self._check(value, self.env.obs_space[key], key)
     return obs
 
   def _check(self, value, space, key):
     if not isinstance(value, (
-        np.ndarray, np.generic, list, tuple, int, float, bool, str)):
+        np.ndarray, np.generic, list, tuple, int, float, bool)):
       raise TypeError(f'Invalid type {type(value)} for key {key}.')
     if value in space:
       return
@@ -291,7 +287,7 @@ class DiscretizeAction(base.Wrapper):
     shape = (self._dims, len(self._values))
     space = spacelib.Space(np.float32, shape, 0, 1)
     space.sample = functools.partial(
-        self._sample_action, self._dims, self._values)
+        self._sample, self._dims, self._values)
     space._discrete = True
     return {**self.env.act_space, self._key: space}
 
@@ -305,7 +301,7 @@ class DiscretizeAction(base.Wrapper):
     return self.env.step({**action, self._key: continuous})
 
   @staticmethod
-  def _sample_action(dims, values):
+  def _sample(dims, values):
     indices = np.random.randint(0, len(values), dims)
     action = np.zeros((dims, len(values)), dtype=np.float32)
     action[np.arange(dims), indices] = 1.0
@@ -344,33 +340,6 @@ class ResizeImage(base.Wrapper):
     image = image.resize(self._size, self._Image.NEAREST)
     image = np.array(image)
     return image
-
-class PadImage(base.Wrapper):
-
-  def __init__(self, env, key, size=(16, 16)):
-    super().__init__(env)
-    self._size = size
-    self._keys = [key]
-    print(f'Resizing keys {",".join(self._keys)} to {self._size}.')
-
-  @functools.cached_property
-  def obs_space(self):
-    spaces = self.env.obs_space
-    for key in self._keys:
-      shape = self._size + spaces[key].shape[2:]
-      spaces[key] = spacelib.Space(np.uint8, shape)
-    return spaces
-
-  def step(self, action):
-    obs = self.env.step(action)
-    for key in self._keys:
-      obs[key] = self._resize(obs[key])
-    return obs
-
-  def _resize(self, image):
-    new = np.zeros((*self._size, image.shape[-1]))
-    new[:image.shape[0], :image.shape[1]] = image
-    return new
 
 
 class RenderImage(base.Wrapper):
@@ -424,40 +393,3 @@ class RestartOnException(base.Wrapper):
       self.env = self._ctor()
       action['reset'] = np.ones_like(action['reset'])
       return self.env.step(action)
-
-
-class StopAfterEpisodes(base.Wrapper):
-
-  def __init__(self, env, limit, delay):
-    super().__init__(env)
-    self._limit = limit
-    self._delay = delay
-    self._episodes = 0
-    self._ended = None
-
-  def step(self, action):
-    obs = self.env.step(action)
-    if obs['is_last']:
-      self._episodes += 1
-    if self._episodes >= self._limit:
-      if self._ended is None:
-        self._ended = time.time()
-      elif time.time() - self._ended > self._delay:
-        print('Finished experiment.')
-        from google3.learning.deepmind.xmanager2.client import xmanager_api as xm
-        xm.XManagerApi().get_current_work_unit().stop()
-        while True:
-          time.sleep(5)
-    return obs
-
-
-class RewardScale(base.Wrapper):
-
-  def __init__(self, env, scale=1.0):
-    super().__init__(env)
-    self._scale = scale
-
-  def step(self, action):
-    obs = self.env.step(action)
-    obs['reward'] *= self._scale
-    return obs

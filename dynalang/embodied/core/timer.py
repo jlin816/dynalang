@@ -1,61 +1,100 @@
-import collections
 import contextlib
+import threading
 import time
+from collections import defaultdict
 
 import numpy as np
 
 
 class Timer:
 
-  def __init__(self, columns=('frac', 'min', 'avg', 'max', 'count', 'total')):
-    available = ('frac', 'avg', 'min', 'max', 'count', 'total')
-    assert all(x in available for x in columns), columns
-    self._columns = columns
-    self._durations = collections.defaultdict(list)
-    self._start = time.time()
-
-  def reset(self):
-    for timings in self._durations.values():
-      timings.clear()
-    self._start = time.time()
+  def __init__(self, enabled=True):
+    self.enabled = enabled
+    self.stack = defaultdict(list)
+    self.paths = set()
+    self.mins = defaultdict(lambda: np.inf)
+    self.maxs = defaultdict(lambda: 0)
+    self.sums = defaultdict(lambda: 0)
+    self.counts = defaultdict(lambda: 0)
+    # self.threads = defaultdict(set)
+    self.start = time.perf_counter_ns()
+    self.writing = False
 
   @contextlib.contextmanager
-  def scope(self, name):
-    start = time.time()
-    yield
-    stop = time.time()
-    self._durations[name].append(stop - start)
+  def section(self, name):
+    if not self.enabled:
+      yield
+      return
+    stack = self.stack[threading.get_ident()]
+    if name in stack:
+      raise RuntimeError(
+          f"Tried to recursively enter timer section {name} " +
+          f"from {'/'.join(stack)}.")
+    stack.append(name)
+    path = '/'.join(stack)
+    start = time.perf_counter_ns()
+    try:
+      yield
+    finally:
+      dur = time.perf_counter_ns() - start
+      stack.pop()
+      if not self.writing:
+        self.paths.add(path)
+        self.sums[path] += dur
+        self.mins[path] = min(self.mins[path], dur)
+        self.maxs[path] = max(self.maxs[path], dur)
+        self.counts[path] += 1
+        # self.threads[path].add(threading.current_thread().name)
 
   def wrap(self, name, obj, methods):
     for method in methods:
-      decorator = self.scope(f'{name}.{method}')
+      decorator = self.section(f'{name}.{method}')
       setattr(obj, method, decorator(getattr(obj, method)))
 
-  def stats(self, reset=True, log=False):
+  def stats(self, reset=True):
+    if not self.enabled:
+      return {}
+    self.writing = True
+    time.sleep(0.001)
+    now = time.perf_counter_ns()
+    passed = now - self.start
+    self.start = now
     metrics = {}
-    metrics['duration'] = time.time() - self._start
-    for name, durs in self._durations.items():
-      available = {}
-      available['count'] = len(durs)
-      available['total'] = np.sum(durs)
-      available['frac'] = np.sum(durs) / metrics['duration']
-      if len(durs):
-        available['avg'] = np.mean(durs)
-        available['min'] = np.min(durs)
-        available['max'] = np.max(durs)
-      for key, value in available.items():
-        if key in self._columns:
-          metrics[f'{name}_{key}'] = value
-    if log:
-      self._log(metrics)
-    if reset:
-      self.reset()
+    div = lambda x, y: x and x / y
+    for key in self.paths:
+      metrics.update({
+          f'{key}/sum': self.sums[key] / 1e9,
+          f'{key}/min': self.mins[key] / 1e9,
+          f'{key}/max': self.maxs[key] / 1e9,
+          f'{key}/avg': div(self.sums[key], self.counts[key]) / 1e9,
+          f'{key}/frac': self.sums[key] / passed,
+          f'{key}/count': self.counts[key],
+      })
+    self.writing = False
+    fracs = {k: metrics[f'{k}/frac'] for k in self.paths}
+    fracs = sorted(fracs.items(), key=lambda x: -x[1])
+    # metrics['summary'] = '\n'.join(
+    #     f'- {100*v:.0f}% {k} ({", ".join(self.threads[k])})' for k, v in fracs)
+    metrics['summary'] = '\n'.join(f'- {100*v:.0f}% {k}' for k, v in fracs)
+    reset and self.reset()
     return metrics
 
-  def _log(self, metrics):
-    names = self._durations.keys()
-    names = sorted(names, key=lambda k: -metrics[f'{k}_frac'])
-    print('Timer:'.ljust(20), ' '.join(x.rjust(8) for x in self._columns))
-    for name in names:
-      values = [metrics[f'{name}_{col}'] for col in self._columns]
-      print(f'{name.ljust(20)}', ' '.join((f'{x:8.4f}' for x in values)))
+  def reset(self):
+    if not self.enabled:
+      return
+    self.writing = True
+    time.sleep(0.001)
+    self.sums.clear()
+    self.mins.clear()
+    self.maxs.clear()
+    self.counts.clear()
+    # self.threads.clear()
+    self.start = time.perf_counter_ns()
+    self.writing = False
+
+
+global_timer = Timer()
+section = global_timer.section
+wrap = global_timer.wrap
+stats = global_timer.stats
+reset = global_timer.reset

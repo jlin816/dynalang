@@ -8,7 +8,7 @@ from functools import partial as bind
 import jax
 import jax.numpy as jnp
 
-__version__ = '0.9.0'
+__version__ = '1.2.0'
 
 
 ###############################################################################
@@ -41,17 +41,17 @@ class Context(dict):
       self[key] = value
 
   def __setitem__(self, key, value):
-    if not self.modify:
-      raise RuntimeError(
-          'Cannot modify state entries here. If you want to modify '
-          'state inside of scan() set modify=True. ' +
-          f'You were trying to set {key} to shape {value.shape} and ' +
-          f'dtype {value.dtype}.')
     if self.ignore and key in self:
       return  # Do not overwrite existing entries.
     if not self.create and key not in self:
       raise RuntimeError(
           'Can only create state entries during first call. ' +
+          f'You were trying to set {key} to shape {value.shape} and ' +
+          f'dtype {value.dtype}.')
+    if not self.modify:
+      raise RuntimeError(
+          'Cannot modify state entries here. If you want to modify '
+          'state inside of scan() set modify=True. ' +
           f'You were trying to set {key} to shape {value.shape} and ' +
           f'dtype {value.dtype}.')
     super().__setitem__(key, value)
@@ -62,6 +62,7 @@ def pure(fun, nested=False):
   state in and out. The result is a pure function that is composable with JAX
   transformation. The pure function can be used as follows:
   `out, state = fun(state, rng, *args, **kwargs)`."""
+  @functools.wraps(fun)
   def purified(
       state, rng, *args, create=None, modify=None, ignore=None, **kwargs):
     context = CONTEXT.get(threading.get_ident(), None)
@@ -83,13 +84,9 @@ def pure(fun, nested=False):
           f'You are trying to call pure {fun.__name__}() inside pure '
           f'{context.name}(). Is that intentional? If you want to nest pure '
           f'functions, use pure(..., nested=True) for the inner function.')
-      # raise RuntimeError(
-      #     f'If you want to nest run() calls, use nested=True. ({context})')
     before = context
     try:
       name = fun.__name__
-      if rng.shape == ():
-        rng = jax.random.PRNGKey(rng)
       context = Context(state.copy(), rng, create, modify, ignore, [], name)
       CONTEXT[threading.get_ident()] = context
       out = fun(*args, **kwargs)
@@ -97,7 +94,6 @@ def pure(fun, nested=False):
       return out, state
     finally:
       CONTEXT[threading.get_ident()] = before
-  purified.pure = True
   return purified
 
 
@@ -146,8 +142,6 @@ def grad(fun, keys, has_aux=False):
   the computed value, selected state entries, their gradients, and if
   applicable auxiliary outputs of the function."""
   keys = keys if hasattr(keys, '__len__') else (keys,)
-  if getattr(fun, 'pure', False):
-    raise ValueError('Use plain jax.grad() for pure functions.')
   if not has_aux:
     fun = lambda *args, _fun=fun, **kwargs: (_fun(*args, *kwargs), {})
   fun = pure(fun, nested=True)
@@ -171,82 +165,78 @@ def grad(fun, keys, has_aux=False):
   return wrapper
 
 
-def jit(fun, static=None, **kwargs):
+def jit(fun, static=(), donate=(), **jit_kwargs):
   """Compiles a pure function for fast execution. Only the first call of the
   function is allowed to create state entries."""
-  if not getattr(fun, 'pure', False):
-    raise ValueError('Use pure() before applying jit().')
-  static = static or ()
+  jit_kwargs['static_argnums'] = [0]
+  jit_kwargs['donate_argnums'] = [1]
 
-  @bind(jax.jit, static_argnums=[0], **kwargs)
-  def init(statics, rng, *args, **kw):
-    # Return only state so JIT can remove dead code for fast initialization.
-    s = fun({}, rng, *args, ignore=True, **dict(statics), **kw)[1]
-    return s
+  @bind(jax.jit, **jit_kwargs)
+  def _init(_static, _donate, *args, **kwargs):
+    _static = dict(_static)
+    _donate = {k: v for k, v in zip(donate, _donate)}
+    return fun({}, *args, ignore=True, **_static, **_donate, **kwargs)[1]
 
-  @bind(jax.jit, static_argnums=[0], **kwargs)
-  def apply(statics, state, rng, *args, **kw):
-    return fun(state, rng, *args, create=False, **dict(statics), **kw)
+  @bind(jax.jit, **jit_kwargs)
+  def _apply(_static, _donate, *args, **kwargs):
+    _static = dict(_static)
+    _donate = {k: v for k, v in zip(donate, _donate)}
+    return fun(*args, create=False, **_static, **_donate, **kwargs)
 
   @functools.wraps(fun)
-  def wrapper(state, rng, *args, init_only=False, **kw):
-    if any([name not in kw for name in static]):
-      raise ValueError('Please pass all static arguments by keyword.')
-    state = state.copy()
-    statics = tuple(sorted([(k, v) for k, v in kw.items() if k in static]))
-    kw = {k: v for k, v in kw.items() if k not in static}
+  def wrapper(state, *args, init=True, apply=True, **kwargs):
+    _static = tuple((k, kwargs.pop(k)) for k in static if k in kwargs)
+    _donate = tuple(kwargs.pop(k) for k in donate)
     if not hasattr(wrapper, 'keys'):
-      created = init(statics, rng, *args, **kw)
-      wrapper.keys = set(created.keys())
-      for key, value in created.items():
-        if key not in state:
-          state[key] = value
-    if init_only:
+      if init:
+        created = _init(_static, _donate, *args, **kwargs)
+        wrapper.keys = set(created.keys())
+        state = {**created, **state}
+      else:
+        wrapper.keys = set(state.keys())
+    if not apply:
       return state
-    else:
-      selected = {k: v for k, v in state.items() if k in wrapper.keys}
-      out, updated = apply(statics, selected, rng, *args, **kw)
-      return out, {**state, **updated}
+    selected = {k: v for k, v in state.items() if k in wrapper.keys}
+    out, updated = _apply(_static, _donate, selected, *args, **kwargs)
+    return out, {**state, **updated}
   return wrapper
 
 
-def pmap(fun, axis_name=None, static=None, **kwargs):
+def pmap(fun, axis_name=None, static=(), donate=(), **pmap_kwargs):
   """Compiles n pure function for fast execution across multiple devices. Only
   the first call of the function is allowed to create state entries."""
-  if not getattr(fun, 'pure', False):
-    raise ValueError('Use pure() before applying jit().')
-  static = static or ()
+  pmap_kwargs['axis_name'] = axis_name
+  pmap_kwargs['static_broadcasted_argnums'] = [0]
+  pmap_kwargs['donate_argnums'] = [1]
 
-  @bind(
-      jax.pmap, axis_name=axis_name, static_broadcasted_argnums=[0], **kwargs)
-  def init(statics, rng, *args, **kw):
-    # Return only state so JIT can remove dead code for fast initialization.
-    return fun({}, rng, *args, ignore=True, **dict(statics), **kw)[1]
+  @bind(jax.pmap, **pmap_kwargs)
+  def _init(_static, _donate, *args, **kwargs):
+    _static = dict(_static)
+    _donate = {k: v for k, v in zip(donate, _donate)}
+    return fun({}, *args, ignore=True, **_static, **_donate, **kwargs)[1]
 
-  @bind(
-      jax.pmap, axis_name=axis_name, static_broadcasted_argnums=[0], **kwargs)
-  def apply(statics, state, rng, *args, **kw):
-    return fun(state, rng, *args, create=False, **dict(statics), **kw)
+  @bind(jax.pmap, **pmap_kwargs)
+  def _apply(_static, _donate, *args, **kwargs):
+    _static = dict(_static)
+    _donate = {k: v for k, v in zip(donate, _donate)}
+    return fun(*args, create=False, **_static, **_donate, **kwargs)
 
   @functools.wraps(fun)
-  def wrapper(state, rng, *args, init_only=False, **kw):
-    if any([name not in kw for name in static]):
-      raise ValueError('Please pass all static arguments by keyword.')
-    state = state.copy()
-    statics = tuple(sorted([(k, v) for k, v in kw.items() if k in static]))
-    kw = {k: v for k, v in kw.items() if k not in static}
+  def wrapper(state, *args, init=True, apply=True, **kwargs):
+    _static = tuple((k, kwargs.pop(k)) for k in static if k in kwargs)
+    _donate = tuple(kwargs.pop(k) for k in donate)
     if not hasattr(wrapper, 'keys'):
-      created = init(statics, rng, *args, **kw)
-      wrapper.keys = set(created.keys())
-      for key, value in created.items():
-        if key not in state:
-          state[key] = value
-    if init_only:
+      if init:
+        created = _init(_static, _donate, *args, **kwargs)
+        wrapper.keys = set(created.keys())
+        state = {**created, **state}
+      else:
+        wrapper.keys = set(state.keys())
+    if not apply:
       return state
-    else:
-      selected = {k: v for k, v in state.items() if k in wrapper.keys}
-      out, updated = apply(statics, selected, rng, *args, **kw)
-      return out, {**state, **updated}
+    selected = {k: v for k, v in state.items() if k in wrapper.keys}
+    out, updated = _apply(_static, _donate, selected, *args, **kwargs)
+    return out, {**state, **updated}
   return wrapper
 
 
@@ -295,8 +285,6 @@ def _prerun(fun, *args, **kwargs):
   if not context().create:
     return
   discarded, state = fun(dict(context()), rng(), *args, ignore=True, **kwargs)
-  # jax.tree_util.tree_map(
-  #     lambda x: hasattr(x, 'delete') and x.delete(), discarded)
   context().update(state)
 
 
@@ -323,8 +311,10 @@ def scope(name, absolute=False):
     SCOPE = name
   else:
     SCOPE = outside + '/' + name
-  yield SCOPE
-  SCOPE = outside
+  try:
+    yield SCOPE
+  finally:
+    SCOPE = outside
 
 
 class ModuleMeta(type):

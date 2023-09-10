@@ -1,3 +1,5 @@
+# TODO: WIP
+
 import io
 import re
 from datetime import datetime
@@ -21,9 +23,9 @@ def train_save(agent, env, replay, logger, args):
   print('Action space:', embodied.format(env.act_space), sep='\n')
 
   timer = embodied.Timer()
-  timer.wrap('agent', agent, ['policy', 'train', 'report', 'save'])
+  timer.wrap('agent', agent, ['policy', 'train', 'report', 'save', 'load'])
   timer.wrap('env', env, ['step'])
-  timer.wrap('replay', replay, ['add', 'save'])
+  timer.wrap('replay', replay, ['add', 'save', 'load'])
   timer.wrap('logger', logger, ['write'])
 
   nonzeros = set()
@@ -43,7 +45,7 @@ def train_save(agent, env, replay, logger, args):
       if key in ep:
         stats[f'policy_{key}'] = ep[key]
     for key, value in ep.items():
-      if not args.log_zeros and key not in nonzeros and (value == 0).all():
+      if not args.log_zeros and key not in nonzeros and np.all(value == 0):
         continue
       nonzeros.add(key)
       if re.match(args.log_keys_sum, key):

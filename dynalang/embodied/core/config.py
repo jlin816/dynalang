@@ -41,10 +41,10 @@ class Config(dict):
   def load(cls, filename):
     filename = path.Path(filename)
     if filename.suffix == '.json':
-      return cls(json.loads(filename.read()))
+      return cls(json.loads(filename.read_text()))
     elif filename.suffix in ('.yml', '.yaml'):
       import ruamel.yaml as yaml
-      return cls(yaml.safe_load(filename.read()))
+      return cls(yaml.safe_load(filename.read_text()))
     else:
       raise NotImplementedError(filename.suffix)
 
@@ -116,21 +116,17 @@ class Config(dict):
       if not keys:
         raise KeyError(f'Unknown key or pattern {key}.')
       for key in keys:
-        if key not in result:
-          print(f"Adding new key {key} to config.")
-          result[key] = new
-        else:
-          old = result[key]
-          try:
-            if isinstance(old, int) and isinstance(new, float):
-              if float(int(new)) != new:
-                message = f"Cannot convert fractional float {new} to int."
-                raise ValueError(message)
-            result[key] = type(old)(new)
-          except (ValueError, TypeError):
-            raise TypeError(
-                f"Cannot convert '{new}' to type '{type(old).__name__}' " +
-                f"for key '{key}' with previous value '{old}'.")
+        old = result[key]
+        try:
+          if isinstance(old, int) and isinstance(new, float):
+            if float(int(new)) != new:
+              message = f"Cannot convert fractional float {new} to int."
+              raise ValueError(message)
+          result[key] = type(old)(new)
+        except (ValueError, TypeError):
+          raise TypeError(
+              f"Cannot convert '{new}' to type '{type(old).__name__}' " +
+              f"for key '{key}' with previous value '{old}'.")
     return type(self)(result)
 
   def _flatten(self, mapping):

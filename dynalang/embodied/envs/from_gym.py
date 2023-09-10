@@ -115,6 +115,4 @@ class FromGym(embodied.Env):
   def _convert(self, space):
     if hasattr(space, 'n'):
       return embodied.Space(np.int32, (), 0, space.n)
-    if isinstance(space, gym.spaces.Text):
-      return embodied.Space(str, (), None, None)  
     return embodied.Space(space.dtype, space.shape, space.low, space.high)

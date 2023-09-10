@@ -55,7 +55,7 @@ class Space:
       return False
     if (value < self.low).any():
       return False
-    if (value.astype(self.dtype).astype(value.dtype) != value).any():
+    if value.dtype != self.dtype:
       return False
     return True
 

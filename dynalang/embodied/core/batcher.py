@@ -5,19 +5,16 @@ import traceback
 
 import numpy as np
 
+from . import timer
+
 
 class Batcher:
-  """Implements zip() with multi-threaded prefetching. The sources are expected to
-  yield dicts of Numpy arrays and the iterator will return dicts of batched
-  Numpy arrays."""
 
   def __init__(
       self, sources, workers=0, postprocess=None,
-      prefetch_source=4, prefetch_batch=2,
-      preprocessors=None):
+      prefetch_source=4, prefetch_batch=2):
     self._workers = workers
     self._postprocess = postprocess
-    self.preprocessors = preprocessors or {}
     if workers:
       # Round-robin assign sources to workers.
       self._running = True
@@ -29,22 +26,20 @@ class Batcher:
         self._queues.append(queue)
         assignments[index % workers][0].append(source)
         assignments[index % workers][1].append(queue)
-      for args in assignments:
+      for i, args in enumerate(assignments):
         creator = threading.Thread(
-            target=self._creator, args=args, daemon=True)
+            target=self._creator, args=args, daemon=True,
+            name=f'creator{i}')
         creator.start()
         self._threads.append(creator)
       self._batches = queuelib.Queue(prefetch_batch)
       batcher = threading.Thread(
-          target=self._batcher, args=(self._queues, self._batches,
-                                      self.preprocessors),
-          daemon=True)
+          target=self._batcher, args=(self._queues, self._batches),
+          daemon=True, name='batcher')
       batcher.start()
       self._threads.append(batcher)
     else:
       self._iterators = [source() for source in sources]
-      # Create all preprocessors in main thread.
-      self.preprocessors = {k: v() for k, v in preprocessors.items()}
     self._once = False
 
   def close(self):
@@ -66,56 +61,46 @@ class Batcher:
 
   def __next__(self):
     if self._workers:
-      batch = self._batches.get()
+      with timer.section('batcher_next'):
+        batch = self._batches.get()
     else:
       elems = [next(x) for x in self._iterators]
-      batch = {}
-      for k in elems[0]:
-        bx = [x[k] for x in elems]
-        if k in self.preprocessors:
-          preproc = self.preprocessors[k](bx)
-          for preproc_key, preproc_val in preproc.items():
-            batch[f"{k}_{preproc_key}"] = preproc_val
-        else:
-          batch[k] = np.stack(bx, 0)
-      if self._postprocess:
-        batch = self._postprocess(batch)
+      batch = {k: np.stack([x[k] for x in elems], 0) for k in elems[0]}
     if isinstance(batch, Exception):
       raise batch
     return batch
 
   def _creator(self, sources, outputs):
+    # import psutil
+    # psutil.Process().nice(10)
     try:
       iterators = [source() for source in sources]
       while self._running:
         for iterator, queue in zip(iterators, outputs):
-          queue.put(next(iterator))
+          with timer.section('batcher_create'):
+            data = next(iterator)
+          queue.put(data)
     except Exception as e:
       e.stacktrace = ''.join(traceback.format_exception(*sys.exc_info()))
       outputs[0].put(e)
       raise
 
-  def _batcher(self, sources, output, preprocessors):
+  def _batcher(self, sources, output):
+    # import psutil
+    # psutil.Process().nice(10)
     try:
-      # Create preprocessors in-thread.
-      preprocessors = {k: v() for k, v in preprocessors.items()}
       while self._running:
-        elems = [x.get() for x in sources]
+        with timer.section('batcher_pull'):
+          elems = [x.get() for x in sources]
         for elem in elems:
           if isinstance(elem, Exception):
             raise elem
-        batch = {}
-        for k in elems[0]:
-          bx = [x[k] for x in elems]
-          if k in preprocessors:
-            preproc = preprocessors[k](bx)
-            for preproc_key, preproc_val in preproc.items():
-              batch[f"{k}_{preproc_key}"] = preproc_val
-          else:
-            batch[k] = np.stack(bx, 0)
+        with timer.section('batcher_stack'):
+          batch = {k: np.stack([x[k] for x in elems], 0) for k in elems[0]}
         if self._postprocess:
-          batch = self._postprocess(batch)
-        output.put(batch)  # Will wait here if the queue is full.
+          with timer.section('batcher_postproc'):
+            batch = self._postprocess(batch)
+        output.put(batch)
     except Exception as e:
       e.stacktrace = ''.join(traceback.format_exception(*sys.exc_info()))
       output.put(e)

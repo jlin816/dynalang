@@ -1,4 +1,5 @@
 import functools
+import threading
 
 
 @functools.total_ordering
@@ -6,6 +7,7 @@ class Counter:
 
   def __init__(self, initial=0):
     self.value = initial
+    self.lock = threading.Lock()
 
   def __repr__(self):
     return f'Counter({self.value})'
@@ -35,7 +37,12 @@ class Counter:
     return other - int(self)
 
   def increment(self, amount=1):
-    self.value += amount
+    with self.lock:
+      self.value += amount
+
+  def reset(self):
+    with self.lock:
+      self.value = 0
 
   def save(self):
     return self.value

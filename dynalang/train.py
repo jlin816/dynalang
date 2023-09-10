@@ -1,10 +1,19 @@
 import importlib
+import os
 import pathlib
-import numpy as np
 import sys
 import warnings
-import os
+import wandb
 from functools import partial as bind
+
+# def warn_with_traceback(
+#       message, category, filename, lineno, file=None, line=None):
+#   log = file if hasattr(file, 'write') else sys.stderr
+#   import traceback
+#   traceback.print_stack(file=log)
+#   log.write(warnings.formatwarning(
+#       message, category, filename, lineno, line))
+# warnings.showwarning = warn_with_traceback
 
 warnings.filterwarnings('ignore', '.*box bound precision lowered.*')
 warnings.filterwarnings('ignore', '.*using stateful random seeds*')
@@ -20,11 +29,16 @@ __package__ = directory.name
 
 import embodied
 from embodied import wrappers
-from embodied.core import path
+
 
 def main(argv=None):
-  from . import agent as agt
 
+  embodied.print(r"---  ___                           __   ______ ---")
+  embodied.print(r"--- |   \ _ _ ___ __ _ _ __  ___ _ \ \ / /__ / ---")
+  embodied.print(r"--- | |) | '_/ -_) _` | '  \/ -_) '/\ V / |_ \ ---")
+  embodied.print(r"--- |___/|_| \___\__,_|_|_|_\___|_|  \_/ |___/ ---")
+
+  from . import agent as agt
   parsed, other = embodied.Flags(configs=['defaults']).parse_known(argv)
   config = embodied.Config(agt.Agent.configs['defaults'])
   for name in parsed.configs:
@@ -32,9 +46,9 @@ def main(argv=None):
   config = embodied.Flags(config).parse(other)
   config = config.update({"logdir": f"{config.logdir}_{config.seed}"})
   args = embodied.Config(
-      **config.run, logdir=f"{config.logdir}",
-      batch_steps=config.batch_size * config.batch_length)
-  # print(config)
+      **config.run, logdir=config.logdir,
+      batch_steps=config.run.batch_size * config.batch_length)
+  print('Run script:', args.script)
 
   logdir = embodied.Path(args.logdir)
   if args.script != 'parallel_env':
@@ -43,36 +57,28 @@ def main(argv=None):
     step = embodied.Counter()
     logger = make_logger(parsed, logdir, step, config)
 
+  embodied.timer.global_timer.enabled = args.timer
+
   cleanup = []
   try:
 
     if args.script == 'train':
-      replay = make_replay(config, logdir / 'episodes')
+      replay = make_replay(config, logdir / 'replay')
       env = wrapped_env(config, batch=True)
       cleanup.append(env)
       agent = agt.Agent(env.obs_space, env.act_space, step, config)
       embodied.run.train(agent, env, replay, logger, args)
 
     elif args.script == 'train_save':
-      replay = make_replay(config, logdir / 'episodes')
+      replay = make_replay(config, logdir / 'replay')
       env = wrapped_env(config, batch=True)
       cleanup.append(env)
       agent = agt.Agent(env.obs_space, env.act_space, step, config)
       embodied.run.train_save(agent, env, replay, logger, args)
 
     elif args.script == 'train_eval':
-      replay = make_replay(config, logdir / 'episodes')
-      eval_replay = make_replay(config, logdir / 'eval_episodes', is_eval=True)
-      env = wrapped_env(config, batch=True)
-      eval_env = wrapped_env(config, batch=True)
-      cleanup += [env, eval_env]
-      agent = agt.Agent(env.obs_space, env.act_space, step, config)
-      embodied.run.train_eval(
-          agent, env, eval_env, replay, eval_replay, logger, args)
-
-    elif args.script == 'train_eval_train':
-      replay = make_replay(config, logdir / 'episodes')
-      eval_replay = make_replay(config, logdir / 'eval_episodes', is_eval=True)
+      replay = make_replay(config, logdir / 'replay')
+      eval_replay = make_replay(config, logdir / 'eval_replay', is_eval=True)
       env = wrapped_env(config, batch=True)
       eval_env = wrapped_env(config, batch=True)
       cleanup += [env, eval_env]
@@ -81,13 +87,13 @@ def main(argv=None):
           agent, env, eval_env, replay, eval_replay, logger, args)
 
     elif args.script == 'train_holdout':
-      replay = make_replay(config, logdir / 'episodes')
+      replay = make_replay(config, logdir / 'replay')
       if config.eval_dir:
         assert not config.train.eval_fill
         eval_replay = make_replay(config, config.eval_dir, is_eval=True)
       else:
         assert 0 < args.eval_fill <= config.replay_size // 10, args.eval_fill
-        eval_replay = make_replay(config, logdir / 'eval_episodes', is_eval=True)
+        eval_replay = make_replay(config, logdir / 'eval_replay', is_eval=True)
       env = wrapped_env(config, batch=True)
       cleanup.append(env)
       agent = agt.Agent(env.obs_space, env.act_space, step, config)
@@ -95,7 +101,7 @@ def main(argv=None):
           agent, env, replay, eval_replay, logger, args)
 
     elif args.script == 'eval_only':
-      env = wrapped_env(config, batch=True, vis=True)
+      env = wrapped_env(config, batch=True)
       cleanup.append(env)
       agent = agt.Agent(env.obs_space, env.act_space, step, config)
       embodied.run.eval_only(agent, env, logger, args)
@@ -103,75 +109,76 @@ def main(argv=None):
     elif args.script == 'parallel':
       assert config.run.actor_batch <= config.envs.amount, (
           config.run.actor_batch, config.envs.amount)
-      ctor = bind(wrapped_env, config, batch=False)
+      make_env2 = bind(wrapped_env, config, batch=False)
       step = embodied.Counter()
-      env = ctor()
-      agent = agt.Agent(env.obs_space, env.act_space, step, config)
+      env = make_env2()
+      obs_space, act_space = env.obs_space, env.act_space
       env.close()
-      replay = make_replay(config, logdir / 'episodes', rate_limit=True)
+      agent = agt.Agent(obs_space, act_space, step, config)
+      make_replay2 = bind(
+          make_replay, config, logdir / 'replay', rate_limit=True)
       embodied.run.parallel(
-          agent, replay, logger, ctor, config.envs.amount, args)
+          agent, logger, make_replay2, make_env2, config.envs.amount, args)
+
+    elif args.script == 'parallel2':
+      assert config.run.actor_batch <= config.envs.amount, (
+          config.run.actor_batch, config.envs.amount)
+      make_env2 = bind(wrapped_env, config, batch=False)
+      step = embodied.Counter()
+      env = make_env2()
+      obs_space, act_space = env.obs_space, env.act_space
+      env.close()
+      agent = agt.Agent(obs_space, act_space, step, config)
+      replay_path = str(logdir / 'replay')
+      make_replay2 = bind(make_replay, config, replay_path, rate_limit=True)
+      embodied.run.parallel2(
+          agent, logger, make_replay2, make_env2, config.envs.amount, args)
+
+    elif args.script == 'parallel3':
+      assert config.run.actor_batch <= config.envs.amount, (
+          config.run.actor_batch, config.envs.amount)
+      make_env2 = bind(wrapped_env, config, batch=False)
+      step = embodied.Counter()
+      env = make_env2()
+      obs_space, act_space = env.obs_space, env.act_space
+      env.close()
+      agent = agt.Agent(obs_space, act_space, step, config)
+      replay_path = str(logdir / 'replay')
+      make_replay2 = bind(make_replay, config, replay_path, rate_limit=True)
+      logger_path = embodied.Path(str(logdir))
+      make_logger2 = bind(make_logger, parsed, logger_path, None, config)
+      embodied.run.parallel3(
+          agent, make_logger2, make_replay2, make_env2, config.envs.amount,
+          args)
 
     elif args.script == 'parallel_agent':
-      ctor = bind(wrapped_env, config, batch=False)
+      make_env2 = bind(wrapped_env, config, batch=False)
       step = embodied.Counter()
-      env = ctor()
-      agent = agt.Agent(env.obs_space, env.act_space, step, config)
+      env = make_env2()
+      obs_space, act_space = env.obs_space, env.act_space
       env.close()
-      replay = make_replay(config, logdir / 'episodes', rate_limit=True)
-      embodied.run.parallel(agent, replay, logger, None, num_envs=0, args=args)
+      agent = agt.Agent(obs_space, act_space, step, config)
+      replay_path = str(logdir / 'replay')
+      make_replay2 = bind(make_replay, config, replay_path, rate_limit=True)
+      logger_path = str(logdir)
+      make_logger2 = bind(make_logger, parsed, logger_path, None, config)
+      embodied.run.parallel3(
+          agent, make_logger2, make_replay2, None, 0, args)
 
     elif args.script == 'parallel_env':
       ctor = bind(wrapped_env, config, batch=False)
-      replica_id = args.env_replica
-      if replica_id < 0:
-        replica_id = int(os.environ['JOB_COMPLETION_INDEX'])
-      embodied.run.parallel_env(replica_id, ctor, args)
+      envid = args.env_replica
+      if envid < 0:
+        envid = int(os.environ['JOB_COMPLETION_INDEX'])
+      embodied.run.parallel_env(envid, ctor, args)
 
-    elif config.run.script == 'offline':
-      assert config.run.pretrain_wm_only
-      from embodied.core.offline import OfflineDataset
-      env = wrapped_env(config, batch=True)
-      offline_ds = OfflineDataset(
-        length=config.batch_length,
-        directories=config.loaddirs,
-      )
-      assert config.eval_dir, "Pass an eval dir for holdout metrics"
-      eval_replay = make_replay(config, config.eval_dir, is_eval=True)
-      agent = agt.Agent(
-        env.obs_space,
-        env.act_space,
-        step,
-        config
-      )
-      env.close()
-      del env
-      embodied.run.offline(
-          agent, offline_ds, eval_replay, logger, args)
-
-    elif config.run.script == 'offline-text':
-      assert config.run.pretrain_wm_only
-      from embodied.core.text import BatchedTextDataset
-      env = wrapped_env(config, batch=True)
-      assert config.eval_dir, "Pass an eval dir for holdout metrics"
-      eval_replay = make_replay(config, config.eval_dir, is_eval=True)
-      offline_ds = BatchedTextDataset(
-        name=config.text_dataset,
-        batch_size=config.batch_size,
-        length=config.batch_length,
-        dataset_space={**env.obs_space, **env.act_space},
-        debug=config.debug,
-      )
-      agent = agt.Agent(
-        env.obs_space,
-        env.act_space,
-        step,
-        config
-      )
-      env.close()
-      del env
-      embodied.run.offline(
-          agent, offline_ds, eval_replay, logger, args)
+    # elif args.script == 'train_with_text':
+    #   replay = make_replay(config, logdir / 'replay')
+    #   env = wrapped_env(config, batch=True)
+    #   cleanup.append(env)
+    #   step = embodied.Counter()
+    #   agent = agt.Agent(env.obs_space, env.act_space, step, config)
+    #   embodied.run.train_with_text(agent, env, replay, logger, args)
 
     else:
       raise NotImplementedError(args.script)
@@ -181,25 +188,35 @@ def main(argv=None):
 
 
 def make_logger(parsed, logdir, step, config):
+  if step is None:
+    step = embodied.Counter()
   multiplier = config.env.get(config.task.split('_')[0], {}).get('repeat', 1)
   logger = embodied.Logger(step, [
-      embodied.logger.TerminalOutput(config.filter),
+      embodied.logger.TerminalOutput(config.filter, 'Agent'),
       embodied.logger.JSONLOutput(logdir, 'metrics.jsonl'),
-      embodied.logger.JSONLOutput(logdir, 'scores.jsonl',
-                                  '(episode/score|real_step)'),
-      embodied.logger.TensorBoardOutput(logdir),
+      embodied.logger.JSONLOutput(logdir, 'scores.jsonl', 'episode/score'),
+      embodied.logger.TensorBoardOutput(
+          logdir, config.run.log_video_fps, videos=config.tensorboard_videos),
   ], multiplier)
   if config.use_wandb:
-    import wandb
     wandb_id_file = f"{str(logdir)}/wandb_id.txt"
-    wandb_pa = path.Path(wandb_id_file)
+    wandb_pa = embodied.Path(wandb_id_file)
     if wandb_pa.exists():
         print("!! Resuming wandb run !!")
         wandb_id = wandb_pa.read().strip()
     else:
         wandb_id = wandb.util.generate_id()
         wandb_pa.write(str(wandb_id))
-    project = config.task
+    if "homegrid" in config.task:
+      project = "homegridv3"
+    elif "messenger" in config.task:
+      project = "messenger"
+    elif "homecook" in config.task:
+      project = "homecook"
+    elif "langroom" in config.task:
+      project = "langroom"
+    else:
+      raise NotImplementedError
     wandb.init(
         id=wandb_id,
         resume="allow",
@@ -210,71 +227,57 @@ def make_logger(parsed, logdir, step, config):
         config=dict(config)
     )
 
+
   return logger
 
 
-def make_replay(
-    config, directory=None, is_eval=False, rate_limit=False,
-    load_directories=None, **kwargs):
-  assert config.replay == 'uniform' or not rate_limit
+def make_replay(config, directory=None, is_eval=False, rate_limit=False):
   length = config.batch_length
   size = config.replay_size // 10 if is_eval else config.replay_size
-  if not (load_directories and load_directories[0]):
-    load_directories = None
-  if config.replay == 'uniform' or is_eval:
-    kw = {
-      'online': config.replay_online,
-      'load_directories': load_directories,
-      'dataset_excluded_keys': config.dataset_excluded_keys,
-    }
-    if rate_limit and config.run.train_ratio > 0:
-      kw['samples_per_insert'] = config.run.train_ratio / config.batch_length
-      kw['tolerance'] = 10 * config.batch_size
-      kw['min_size'] = config.batch_size
-    replay = embodied.replay.Uniform(length, size, directory, **kw)
-  elif config.replay == 'reverb':
-    replay = embodied.replay.Reverb(length, size, directory)
-  elif config.replay == 'chunks':
-    replay = embodied.replay.NaiveChunks(length, size, directory)
-  else:
-    raise NotImplementedError(config.replay)
+  kwargs = {}
+  if rate_limit and config.run.train_ratio > 0:
+    kwargs['samples_per_insert'] = config.run.train_ratio / config.batch_length
+    kwargs['tolerance'] = 10 * config.run.batch_size
+    kwargs['min_size'] = config.run.batch_size
+  replay = embodied.replay.Replay(length, size, directory, **kwargs)
   return replay
 
 
 def wrapped_env(config, batch, **overrides):
-  ctor = bind(make_env, config, **overrides)
-  if batch and config.envs.parallel != 'none':
-    ctor = bind(embodied.Parallel, ctor, config.envs.parallel)
-  if config.envs.restart:
-    ctor = bind(wrappers.RestartOnException, ctor)
   if batch:
-    envs = [ctor() for _ in range(config.envs.amount)]
-    return embodied.BatchEnv(envs, (config.envs.parallel != 'none'))
+    envs = []
+    for index in range(config.envs.amount):
+      ctor = bind(make_env, config, index, **overrides)
+      if batch and config.envs.parallel != 'none':
+        ctor = bind(embodied.Parallel, ctor, config.envs.parallel)
+      if config.envs.restarts:
+        ctor = bind(wrappers.RestartOnException, ctor)
+      envs.append(ctor())
+    return embodied.BatchEnv(envs, config.envs.parallel)
   else:
-    return ctor()
+    return make_env(config, index=0, **overrides)
 
 
-def make_env(config, **overrides):
+def make_env(config, index, **overrides):
   from embodied.envs import from_gym
   suite, task = config.task.split('_', 1)
+  if suite == 'procgen':  # TODO
+    import procgen  # noqa
   ctor = {
-    'dummy': 'embodied.envs.dummy:Dummy',
-    'gym': 'embodied.envs.from_gym:FromGym',
-    'dm': 'embodied.envs.from_dmenv:FromDM',
-    'crafter': 'embodied.envs.crafter:Crafter',
-    'dmc': 'embodied.envs.dmc:DMC',
-    'atari': 'embodied.envs.atari:Atari',
-    'atari100k': 'embodied.envs.atari:Atari',
-    'dmlab': 'embodied.envs.dmlab:DMLab',
-    'minecraft': 'embodied.envs.minecraft:Minecraft',
-    'loconav': 'embodied.envs.loconav:LocoNav',
-    'pinpad': 'embodied.envs.pinpad:PinPad',
-    'messenger': 'embodied.envs.messenger:Messenger',
-    'homegrid': 'embodied.envs.homegrid:HomeGrid',
-    'vln': 'embodied.envs.vln:VLNEnv',
-    'langroom': 'langroom:LangRoom',
-    'procgen': lambda task, **kw: from_gym.FromGym(
-        f'procgen:procgen-{task}-v0', **kw),
+      'dummy': 'embodied.envs.dummy:Dummy',
+      'gym': 'embodied.envs.from_gym:FromGym',
+      'dm': 'embodied.envs.from_dmenv:FromDM',
+      'crafter': 'embodied.envs.crafter:Crafter',
+      'dmc': 'embodied.envs.dmc:DMC',
+      'atari': 'embodied.envs.atari:Atari',
+      'atari100k': 'embodied.envs.atari:Atari',
+      'dmlab': 'embodied.envs.dmlab:DMLab',
+      'minecraft': 'embodied.envs.minecraft:Minecraft',
+      'loconav': 'embodied.envs.loconav:LocoNav',
+      'pinpad': 'embodied.envs.pinpad:PinPad',
+      'langroom': 'langroom:LangRoom',
+      'procgen': lambda task, **kw: from_gym.FromGym(
+          f'procgen:procgen-{task}-v0', **kw),  # TODO
   }[suite]
   if isinstance(ctor, str):
     module, cls = ctor.split(':')
@@ -282,34 +285,24 @@ def make_env(config, **overrides):
     ctor = getattr(module, cls)
   kwargs = config.env.get(suite, {})
   kwargs.update(overrides)
+  if kwargs.get('use_seed', False):
+    kwargs['seed'] = hash((config.seed, index))
   env = ctor(task, **kwargs)
   return wrap_env(env, config)
 
 
 def wrap_env(env, config):
-  from embodied import wrappers
   args = config.wrapper
-  # Env specific wrappers
-  if hasattr(env, "wrappers"):
-    for w in env.wrappers:
-      env = w(env)
-
-#  for name, space in env.obs_space.items():
-#    if space.dtype in (np.uint32, np.uint64):
-#      env = wrappers.OneHotObs(env, name)
-
   for name, space in env.act_space.items():
     if name == 'reset':
       continue
-    elif space.discrete:
-      env = wrappers.OneHotAction(env, name)
-    elif args.discretize:
-      env = wrappers.DiscretizeAction(env, name, args.discretize)
-    else:
+    elif not space.discrete:
       env = wrappers.NormalizeAction(env, name)
+      if args.discretize:
+        env = wrappers.DiscretizeAction(env, name, args.discretize)
   env = wrappers.ExpandScalars(env)
   if args.length:
-    env = wrappers.TimeLimit(env, args.length, args.reset, args.timeout_reward)
+    env = wrappers.TimeLimit(env, args.length, args.reset)
   if args.checks:
     env = wrappers.CheckSpaces(env)
   for name, space in env.act_space.items():

@@ -1,5 +1,4 @@
 import io
-import threading
 from datetime import datetime
 
 import embodied
@@ -8,77 +7,88 @@ import numpy as np
 
 class Chunk:
 
-  def __init__(self, size, successor=None):
+  __slots__ = ('time', 'uuid', 'succ', 'length', 'size', 'data', 'saved')
+
+  def __init__(self, size=1024):
     now = datetime.now()
     self.time = now.strftime("%Y%m%dT%H%M%S") + f'F{now.microsecond:06d}'
-    self.uuid = str(embodied.uuid())
-    self.successor = successor
+    self.uuid = embodied.uuid()
+    self.succ = embodied.uuid(0)
+    # self.uuid = int(np.random.randint(1, 2 * 63))
+    # self.succ = 0
+    self.length = 0
     self.size = size
     self.data = None
-    self.length = 0
-    self.lock = threading.Lock()
+    self.saved = False
 
   def __repr__(self):
-    succ = self.successor or str(embodied.uuid(0))
-    succ = succ.uuid if isinstance(succ, type(self)) else succ
-    return (
-        f'Chunk(uuid={self.uuid}, '
-        f'succ={succ}, '
-        f'len={self.length})')
+    return f'Chunk({self.filename})'
 
-  def __len__(self):
-    return self.length
+  def __lt__(self, other):
+    return self.time < other.time
 
-  def __bool__(self):
-    return True
+  @property
+  def filename(self):
+    succ = self.succ.uuid if isinstance(self.succ, type(self)) else self.succ
+    return f'{self.time}-{str(self.uuid)}-{str(succ)}-{self.length}.npz'
+
+  @property
+  def nbytes(self):
+    if not self.data:
+      return 0
+    return sum(x.nbytes for x in self.data.values())
 
   def append(self, step):
+    assert self.length < self.size
     if not self.data:
-      example = {k: embodied.convert(v) for k, v in step.items()}
+      example = step
       self.data = {
-          k: np.empty((self.size,) + v.shape, v.dtype)
+          k: np.empty((self.size, *v.shape), v.dtype)
           for k, v in example.items()}
     for key, value in step.items():
       self.data[key][self.length] = value
     self.length += 1
+    if self.length == self.size:
+      [x.setflags(write=False) for x in self.data.values()]
 
+  def slice(self, index, length):
+    assert 0 <= index and index + length <= self.length
+    return {k: v[index: index + length] for k, v in self.data.items()}
+
+  @embodied.timer.section('chunk_save')
   def save(self, directory):
-    # The lock makes sure that we aren't trying to save the same chunk multiple
-    # times in parallel. This could otherwise happen, for example when a chunk
-    # reachings its maximum length soon after initiating a checkpoint write.
-    with self.lock:
-      succ = self.successor or str(embodied.uuid(0))
-      succ = succ.uuid if isinstance(succ, type(self)) else succ
-      filename = f'{self.time}-{self.uuid}-{succ}-{self.length}.npz'
-      filename = embodied.Path(directory) / filename
-      data = {k: embodied.convert(v) for k, v in self.data.items()}
-      with io.BytesIO() as stream:
-        np.savez_compressed(stream, **data)
-        stream.seek(0)
-        filename.write(stream.read(), mode='wb')
-      print(f'Saved chunk: {filename.name}')
+    assert not self.saved
+    self.saved = True
+    filename = embodied.Path(directory) / self.filename
+    data = {k: v[:self.length] for k, v in self.data.items()}
+    with io.BytesIO() as stream:
+      np.savez_compressed(stream, **data)
+      stream.seek(0)
+      filename.write(stream.read(), mode='wb')
+    print(f'Saved chunk: {filename.name}')
 
   @classmethod
-  def load(cls, filename):
-    length = int(filename.stem.split('-')[3])
-    with embodied.Path(filename).open('rb') as f:
-      data = np.load(f, allow_pickle=True)
-      data = {k: data[k] for k in data.keys()}
+  def load(cls, filename, error='raise'):
+    assert error in ('raise', 'none')
+    time, uuid, succ, length = filename.stem.split('-')
+    length = int(length)
+    try:
+      with embodied.Path(filename).open('rb') as f:
+        data = np.load(f)
+        data = {k: data[k] for k in data.keys()}
+    except Exception as e:
+      print(f'Error loading chunk {filename}: {e}')
+      if error == 'raise':
+        raise
+      else:
+        return None
     chunk = cls(length)
-    chunk.time = filename.stem.split('-')[0]
-    chunk.uuid = filename.stem.split('-')[1]
-    chunk.successor = filename.stem.split('-')[2]
+    chunk.time = time
+    chunk.uuid = embodied.uuid(uuid)
+    chunk.succ = embodied.uuid(succ)
+    # chunk.uuid = int(uuid)
+    # chunk.succ = int(succ)
     chunk.length = length
     chunk.data = data
+    chunk.saved = True
     return chunk
-
-  @classmethod
-  def scan(cls, directory, capacity=None, shorten=0):
-    directory = embodied.Path(directory)
-    filenames, total = [], 0
-    for filename in reversed(sorted(directory.glob('*.npz'))):
-      if capacity and total >= capacity:
-        break
-      filenames.append(filename)
-      total += max(0, int(filename.stem.split('-')[3]) - shorten)
-    return sorted(filenames)
