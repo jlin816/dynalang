@@ -67,19 +67,19 @@ git clone https://github.com/jlin816/habitat-lab habitat_lab
 ```bash
 conda create -n py27 python=2.7
 conda activate py27
-python scripts/download_mp.py --task habitat -o VLN-CE/data/scene_datasets/mp3d/
-cd VLN-CE/data/scene_datasets
+python scripts/download_mp.py --task habitat -o VLN_CE/data/scene_datasets/mp3d/
+cd VLN_CE/data/scene_datasets
 unzip mp3d/v1/tasks/mp3d_habitat.zip
 conda deactivate
 ```
 
-Scenes should now be populated into directories under `VLN-CE/data/scene_datasets/mp3d/{scene_dir}/...`.
+Scenes should now be populated into directories under `VLN_CE/data/scene_datasets/mp3d/{scene_dir}/...`.
 
-4. Download Room-to-Room dataset into the VLN-CE directory: [additional instructions](https://github.com/jacobkrantz/VLN-CE#episodes-room-to-room-r2r)
+4. Download Room-to-Room dataset into the VLN_CE directory: [additional instructions](https://github.com/jacobkrantz/VLN-CE#episodes-room-to-room-r2r)
 
 ```bash
-mkdir -p VLN-CE/data/datasets
-cd VLN-CE/data/datasets
+mkdir -p VLN_CE/data/datasets
+cd VLN_CE/data/datasets
 gdown https://drive.google.com/uc?id=1kQ_at68wiK2vAmlWbjJ4EDrLtaM0nfkR
 unzip R2R_VLNCE_v1-3_preprocessed.zip
 ```
