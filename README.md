@@ -40,7 +40,9 @@ git clone https://github.com/ahjwang/messenger-emma
 pip install -e messenger-emma
 ```
 
-3. Run the example training script for s1, s2, or s3:
+3. Download the pre-embedded sentences from [Google Drive](https://drive.google.com/drive/u/0/folders/1XuacEUmWAvPtYBJ5YEc21yV7aExzPY1X) and place the `pkl` file into `dynalang/embodied/envs/data`.
+
+4. Run the example training script for s1, s2, or s3:
 ```bash
 sh scripts/run_messenger_s1.sh EXP_NAME GPU_IDS SEED
 ```
@@ -84,7 +86,9 @@ gdown https://drive.google.com/uc?id=1kQ_at68wiK2vAmlWbjJ4EDrLtaM0nfkR
 unzip R2R_VLNCE_v1-3_preprocessed.zip
 ```
 
-5. Run the example training script:
+5. Download the pre-embedded sentences from [Google Drive](https://drive.google.com/drive/u/0/folders/1XuacEUmWAvPtYBJ5YEc21yV7aExzPY1X) and place the `pkl` file into `dynalang/embodied/envs/data`.
+
+6. Run the example training script:
 ```bash
 sh scripts/run_vln.sh EXP_NAME GPU_IDS SEED
 ```
