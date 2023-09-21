@@ -158,7 +158,7 @@ class Messenger(embodied.Env):
         embeds = self.encoder(**tokens).last_hidden_state.squeeze(0)
       self.embed_cache[string] = embeds.cpu().numpy()
       self.token_cache[f"{string}_{self.max_token_seqlen}"] = {
-        k: v.squeeze(0).cpu().numpy() for k, v in tokens
+        k: v.squeeze(0).cpu().numpy() for k, v in tokens.items()
       }
     return (
       self.embed_cache[string],
